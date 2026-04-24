@@ -1,0 +1,1240 @@
+STM32F7 TERRAIN BOT FIRMWARE - DETAILED NOTES
+Project path: D:\main project\stm32f7\stm32f7disco
+Board/MCU: STM32F746 Discovery / STM32F746NGHX
+
+============================================================
+1. HIGH LEVEL SUMMARY
+============================================================
+
+This firmware is for a four wheel terrain robot controlled by an STM32F7 board.
+
+The STM32 firmware does these main jobs:
+
+1. Initializes the STM32F7 hardware peripherals.
+2. Reads an ICM20948 IMU over I2C.
+3. Reads wheel encoder data from an ESP32 over I2C.
+4. Drives four motors using PWM timer outputs.
+5. Estimates roll, pitch, and yaw using a Madgwick attitude filter.
+6. Calculates a terrain/safety risk score from tilt and acceleration.
+7. Reduces motor speed or stops the robot when unsafe.
+8. Displays robot status on the STM32F746 Discovery LCD.
+9. Communicates with ROS 2 through micro-ROS over UART6.
+
+In simple words:
+ROS sends /cmd_vel velocity commands to the STM32. The STM32 converts those commands into left/right wheel speeds, controls the motors, reads sensors, checks safety, and publishes IMU and encoder feedback back to ROS.
+
+
+============================================================
+2. MAIN FILE ORGANIZATION
+============================================================
+
+Important custom files:
+
+Src/main.c
+    CubeMX generated startup file.
+    Initializes hardware and then calls App_Run().
+
+Src/app.c
+    Main robot application.
+    Contains the control loop, safety logic, micro-ROS setup, publishing, subscription callback, and task timing.
+
+Src/motor.c
+Inc/motor.h
+    Motor driver.
+    Converts speed commands in mm/s into PWM duty values.
+    Controls four motors using timer PWM channels.
+
+Src/encoder.c
+Inc/encoder.h
+    Encoder interface.
+    Communicates with an ESP32 over I2C.
+    Receives wheel ticks and wheel velocities.
+
+Src/icm20948.c
+Inc/icm20948.h
+    ICM20948 IMU driver.
+    Initializes and reads accelerometer, gyroscope, magnetometer, and temperature data.
+
+Src/madgwick.c
+Inc/madgwick.h
+    Madgwick attitude filter.
+    Converts IMU data into quaternion, roll, pitch, and yaw.
+
+Src/microros_transport.c
+Inc/microros_transport.h
+    micro-ROS custom transport.
+    Sends and receives micro-ROS packets over UART6.
+
+Src/lcd_display.c
+Inc/lcd_display.h
+    LCD dashboard.
+    Draws text, bars, wheel velocity, motor PWM, risk level, and ROS/encoder status.
+
+Src/syscalls.c
+Src/sysmem.c
+    Newlib system call stubs for embedded C library support.
+    syscalls.c now also includes _gettimeofday() using HAL_GetTick().
+
+Generated CubeMX files:
+
+Src/i2c.c
+Src/usart.c
+Src/tim.c
+Src/gpio.c
+Src/fmc.c
+Src/ltdc.c
+Src/dma2d.c
+Src/stm32f7xx_hal_msp.c
+Src/stm32f7xx_it.c
+Src/system_stm32f7xx.c
+
+These configure the STM32 hardware peripherals.
+
+
+============================================================
+3. PROGRAM STARTUP FLOW
+============================================================
+
+The firmware starts in main.c.
+
+Main sequence:
+
+1. MPU_Config()
+    Configures Memory Protection Unit settings.
+
+2. HAL_Init()
+    Initializes the HAL library.
+    Sets up SysTick, which is used by HAL_GetTick().
+
+3. SystemClock_Config()
+    Configures the STM32 clock using HSE and PLL.
+    The system runs from PLL clock.
+
+4. Peripheral initialization:
+    MX_GPIO_Init()
+    MX_I2C1_Init()
+    MX_TIM1_Init()
+    MX_TIM3_Init()
+    MX_TIM10_Init()
+    MX_TIM11_Init()
+    MX_TIM12_Init()
+    MX_TIM13_Init()
+    MX_TIM14_Init()
+    MX_USART6_UART_Init()
+    MX_DMA2D_Init()
+    MX_FMC_Init()
+    MX_LTDC_Init()
+    MX_TIM2_Init()
+
+5. App_Run()
+    This function never returns during normal operation.
+    It contains the robot control loop.
+
+6. while(1)
+    This loop exists in main.c, but normally it is not reached because App_Run() has its own infinite loop.
+
+
+============================================================
+4. SYSTEM CLOCK
+============================================================
+
+SystemClock_Config() uses:
+
+HSE oscillator:
+    HSE bypass mode
+
+PLL settings:
+    PLLM = 25
+    PLLN = 432
+    PLLP = DIV2
+    PLLQ = 2
+
+AHB divider:
+    SYSCLK_DIV1
+
+APB1 divider:
+    HCLK_DIV4
+
+APB2 divider:
+    HCLK_DIV2
+
+OverDrive mode is enabled.
+
+Purpose:
+    This configures the STM32F7 for high performance operation.
+
+
+============================================================
+5. APP_RUN() INITIALIZATION
+============================================================
+
+App_Run() is the main robot function in Src/app.c.
+
+Initialization order:
+
+1. LCD_Display_Init()
+    Turns on the LCD panel pins.
+    Clears screen.
+    Draws dashboard labels.
+
+2. ICM20948_Init(&hi2c1)
+    Initializes IMU on I2C1.
+    If IMU is not found, Error_Handler() is called.
+
+3. Encoder_Init(&hi2c1)
+    Prepares encoder communication with ESP32 over I2C1.
+
+4. Motor_Init(...)
+    Starts PWM on all motor timer channels.
+    Stops all motors initially.
+
+5. Madgwick_Init(&ahrs, MADGWICK_BETA)
+    Initializes attitude filter.
+
+6. uros_setup()
+    If USE_MICROROS is enabled:
+        Sets custom UART transport.
+        Waits for micro-ROS agent.
+        Creates node.
+        Creates publishers and subscriber.
+    If USE_MICROROS is disabled:
+        Function does nothing.
+
+7. IMU calibration loop
+    Reads 200 IMU samples.
+    Calculates gyro bias.
+    Calculates gravity reference.
+    Displays CALIB status on LCD.
+
+8. seed_filter_from_accel()
+    Uses accelerometer to set initial roll and pitch quaternion.
+
+9. Initializes all task timestamps using HAL_GetTick().
+
+10. Enters infinite loop.
+
+
+============================================================
+6. MAIN CONTROL LOOP TIMING
+============================================================
+
+The firmware does not use an RTOS.
+It uses one while(1) loop and checks elapsed time using HAL_GetTick().
+
+Timing constants:
+
+IMU_MS       = 10 ms
+ENC_MS       = 20 ms
+PID_MS       = 10 ms
+PUB_IMU_MS   = 10 ms
+PUB_ENC_MS   = 20 ms
+LCD_MS       = 100 ms
+WDG_MS       = 500 ms
+
+This means:
+
+IMU update:
+    100 Hz
+
+Encoder update:
+    50 Hz
+
+Motor PID:
+    100 Hz
+
+IMU ROS publish:
+    100 Hz
+
+Encoder ROS publish:
+    50 Hz
+
+LCD update:
+    10 Hz
+
+Command watchdog:
+    If no /cmd_vel command arrives for 500 ms, motors stop.
+
+
+============================================================
+7. MICRO-ROS SETUP
+============================================================
+
+micro-ROS code is compiled only when USE_MICROROS is defined.
+
+In app.c:
+
+    #ifdef USE_MICROROS
+
+This means the project can build without micro-ROS if that symbol is not enabled.
+
+micro-ROS setup function:
+    uros_setup()
+
+Steps:
+
+1. rmw_uros_set_custom_transport()
+    Connects micro-ROS middleware to the custom UART transport functions:
+        transport_open
+        transport_close
+        transport_write
+        transport_read
+
+2. rmw_uros_ping_agent(200, 10)
+    Waits until the STM32 can reach the micro-ROS agent.
+    It retries every 200 ms.
+
+3. rclc_support_init()
+    Initializes ROS support structures.
+
+4. rclc_node_init_default()
+    Creates node:
+        node name: stm32f7_node
+        namespace: terrain_bot
+
+5. Creates publishers:
+    /imu/data
+        Type: sensor_msgs/msg/Imu
+
+    /wheel_ticks
+        Type: std_msgs/msg/Int32MultiArray
+
+    /wheel_velocity
+        Type: std_msgs/msg/Float32MultiArray
+
+6. Creates subscriber:
+    /cmd_vel
+        Type: geometry_msgs/msg/Twist
+
+7. Creates executor:
+    The executor handles incoming /cmd_vel messages.
+
+
+============================================================
+8. MICRO-ROS UART TRANSPORT
+============================================================
+
+File:
+    Src/microros_transport.c
+
+UART:
+    USART6
+
+CubeMX UART settings:
+    Baud rate: 115200
+    Word length: 8 bits
+    Stop bits: 1
+    Parity: none
+    Mode: TX/RX
+    Hardware flow control: none
+
+Pins:
+    PC6 = USART6_TX
+    PC7 = USART6_RX
+
+transport_write():
+    Uses HAL_UART_Transmit().
+    Sends bytes from STM32 to the micro-ROS agent.
+
+transport_read():
+    Uses HAL_UART_Receive().
+    Reads bytes from the micro-ROS agent.
+
+clock_gettime():
+    Provides time to micro-ROS using HAL_GetTick().
+    This is uptime since boot, not real wall clock time.
+
+Host agent command from project notes:
+
+    ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyUSB0 -b 115200
+
+The serial device path may be different on the host computer.
+
+
+============================================================
+9. /CMD_VEL SUBSCRIBER
+============================================================
+
+Callback:
+    cmd_cb()
+
+Input:
+    geometry_msgs/msg/Twist
+
+Used fields:
+    tw->linear.x
+    tw->angular.z
+
+The code converts:
+
+linear.x:
+    Robot forward velocity in m/s.
+    Converted to mm/s:
+        vx = linear.x * 1000
+
+angular.z:
+    Robot yaw rate in rad/s.
+
+Wheelbase:
+    ENC_WHEELBASE_MM = 200.0 mm
+
+Differential drive conversion:
+
+    half_track = wheelbase / 2
+    left  = vx - angular_z * half_track
+    right = vx + angular_z * half_track
+
+Motor targets:
+
+    Front left  = left
+    Rear left   = left
+    Front right = right
+    Rear right  = right
+
+After receiving a command:
+
+    g_cmd_ms = HAL_GetTick()
+    g_host_ok = 1
+
+This refreshes the watchdog timer.
+
+
+============================================================
+10. COMMAND WATCHDOG
+============================================================
+
+The robot expects regular /cmd_vel commands.
+
+In the main loop:
+
+    g_host_ok = (now - g_cmd_ms) <= WDG_MS
+
+WDG_MS = 500 ms
+
+If no command arrives for more than 500 ms:
+
+1. All target speeds are set to zero.
+2. PID integrals are cleared.
+3. Motor_StopAll() is called.
+
+Purpose:
+    If ROS, Raspberry Pi, serial link, or agent fails, the robot stops instead of continuing with an old command.
+
+
+============================================================
+11. IMU DRIVER - ICM20948
+============================================================
+
+Files:
+    Src/icm20948.c
+    Inc/icm20948.h
+
+I2C address:
+    ICM20948_ADDR = 0x68 << 1
+
+The HAL expects the 7-bit address shifted left by 1.
+
+WHO_AM_I check:
+    Expected value: 0xEA
+
+If WHO_AM_I is not 0xEA:
+    ICM20948_Init() returns HAL_ERROR.
+    App_Run() calls Error_Handler().
+
+IMU initialization:
+
+1. Select bank 0.
+2. Reset device using PWR_MGMT_1.
+3. Wake device.
+4. Check WHO_AM_I.
+5. Enable accelerometer and gyroscope.
+6. Configure gyro sample rate.
+7. Configure gyro full scale/filter.
+8. Configure accelerometer sample rate.
+9. Configure accelerometer full scale/filter.
+10. Enable I2C master mode inside ICM20948 for magnetometer access.
+11. Configure AK09916 magnetometer.
+12. Enable data-ready interrupt.
+
+Read function:
+    ICM20948_Read()
+
+It reads 23 bytes starting at ACCEL_XOUT_H.
+
+Converted outputs:
+
+Accelerometer:
+    ax, ay, az in m/s^2
+
+Gyroscope:
+    gx, gy, gz in rad/s
+
+Magnetometer:
+    mx, my, mz in microtesla
+
+Temperature:
+    temp_c in deg C
+
+Timestamp:
+    timestamp_ms = HAL_GetTick()
+
+
+============================================================
+12. IMU CALIBRATION
+============================================================
+
+Calibration function:
+    ICM20948_Calibrate()
+
+Number of samples:
+    CALIB_N = 200
+
+During calibration:
+
+1. Gyro X bias is accumulated.
+2. Gyro Y bias is accumulated.
+3. Gyro Z bias is accumulated.
+4. Acceleration magnitude is accumulated as gravity reference.
+
+After 200 samples:
+
+    gx_bias = average gx
+    gy_bias = average gy
+    gz_bias = average gz
+    gravity = average acceleration magnitude
+    done = true
+
+Important:
+    The robot should be still during calibration.
+    If it moves during calibration, gyro bias and gravity reference can be wrong.
+
+
+============================================================
+13. MADGWICK ATTITUDE FILTER
+============================================================
+
+Files:
+    Src/madgwick.c
+    Inc/madgwick.h
+
+Purpose:
+    Estimate orientation from IMU data.
+
+State variables:
+
+    q0, q1, q2, q3
+        Quaternion orientation.
+
+    roll
+    pitch
+    yaw
+        Euler angles in radians.
+
+    beta
+        Filter gain.
+
+Filter gain:
+    MADGWICK_BETA = 0.033
+
+The filter uses:
+
+1. Gyroscope integration.
+2. Accelerometer correction.
+
+Madgwick_UpdateMARG():
+    Exists for gyro + accel + magnetometer.
+    But currently it calls Madgwick_UpdateIMU().
+    So magnetometer yaw correction is not really implemented yet.
+
+Madgwick_UpdateIMU():
+    Uses gx, gy, gz, ax, ay, az, dt.
+    Normalizes acceleration.
+    Computes gradient correction.
+    Updates quaternion.
+    Normalizes quaternion.
+    Converts quaternion to roll, pitch, yaw.
+
+Important:
+    Roll and pitch are useful for terrain safety.
+    Yaw may drift over time because magnetometer correction is not active.
+
+
+============================================================
+14. SAFETY / TERRAIN RISK LOGIC
+============================================================
+
+Function:
+    update_safety()
+
+Purpose:
+    Calculate a risk value from 0.0 to 1.0.
+    Use risk to reduce motor output.
+    Stop motors if robot tilt is dangerous.
+
+Inputs:
+    pitch from Madgwick filter
+    roll from Madgwick filter
+    pitch rate from gyro
+    acceleration magnitude from IMU
+
+Important constants:
+
+    S_SAFE      = 10 deg
+    S_CRIT      = 30 deg
+    S_ESTOP_P   = 30 deg pitch
+    S_ESTOP_R   = 40 deg roll
+    S_FLIP_RATE = 30 deg/s
+    S_FLIP_P    = 15 deg
+
+Emergency stop condition:
+
+If:
+    abs(pitch) >= 30 deg
+    OR abs(roll) >= 40 deg
+    OR pitch_rate > 30 deg/s and pitch > 15 deg
+
+Then:
+    g_risk = 1.0
+    g_scale = 0.0
+    Motor_StopAll()
+
+Risk calculation:
+
+1. Weighted tilt:
+       weighted = 0.7 * abs(pitch) + 0.3 * abs(roll)
+
+2. Inclination risk:
+       r_incl = (weighted - 10) / (30 - 10)
+       clamped between 0 and 1
+
+3. Shake risk:
+       accel_mag = sqrt(ax^2 + ay^2 + az^2)
+       r_shake = abs(accel_mag - gravity_reference) / gravity_reference
+       clamped between 0 and 1
+
+4. Combined risk:
+       r_raw = 0.7 * r_incl + 0.3 * r_shake
+
+5. Low pass filter:
+       g_risk = 0.90 * old_risk + 0.10 * r_raw
+
+6. Motor scale:
+       g_scale = (1 - g_risk)^2
+
+Meaning:
+    Low risk gives nearly full motor speed.
+    Higher risk smoothly reduces motor speed.
+    Risk = 1 stops the robot.
+
+
+============================================================
+15. MOTOR CONTROL
+============================================================
+
+Files:
+    Src/motor.c
+    Inc/motor.h
+
+Motors:
+
+    MOTOR_FL = front left
+    MOTOR_FR = front right
+    MOTOR_RL = rear left
+    MOTOR_RR = rear right
+
+Motor command unit:
+    mm/s
+
+Maximum speed:
+    MOTOR_MAX_SPEED_MMPS = 44.5 mm/s
+
+Motor_Set():
+
+1. Checks motor driver is ready.
+2. Checks motor ID is valid.
+3. Clamps velocity between -44.5 and +44.5 mm/s.
+4. Determines direction.
+5. Converts absolute speed to PWM duty.
+6. Ramps duty gradually using MOTOR_RAMP_STEP.
+7. Updates encoder direction state.
+8. Writes PWM compare values.
+
+Ramping:
+    MOTOR_RAMP_STEP = 200
+
+This avoids sudden PWM jumps.
+
+Motor_StopAll():
+
+1. Sets all motor PWM channels to 0.
+2. Clears current duty array.
+3. Clears direction array.
+4. Sends zero directions to encoder system.
+
+
+============================================================
+16. MOTOR PWM CHANNEL MAPPING
+============================================================
+
+The motor driver uses two PWM channels per motor.
+One channel is driven for one direction, the other channel for the opposite direction.
+
+Front left:
+    TIM10 CH1
+    TIM11 CH1
+    Pins:
+        PF6  = TIM10_CH1
+        PF7  = TIM11_CH1
+
+Front right:
+    TIM13 CH1
+    TIM14 CH1
+    Pins:
+        PF8  = TIM13_CH1
+        PF9  = TIM14_CH1
+
+Rear left:
+    TIM12 CH2
+    TIM12 CH1
+    Pins:
+        PB15 = TIM12_CH2
+        PH6  = TIM12_CH1
+
+Rear right:
+    TIM3 CH1
+    TIM2 CH1
+    Pins:
+        PB4  = TIM3_CH1
+        PA15 = TIM2_CH1
+
+Important:
+    The exact forward/reverse polarity depends on wiring and motor driver input mapping.
+    The code chooses one channel for forward and one for reverse.
+
+
+============================================================
+17. MOTOR PID CONTROL
+============================================================
+
+Function:
+    motor_pid()
+
+Runs every:
+    PID_MS = 10 ms
+
+For each motor:
+
+1. target = desired speed * safety scale
+2. measured = Encoder_VelMmps(i)
+3. error = target - measured
+4. integral += error * dt
+5. integral is clamped to MOTOR_ILIMIT
+6. command = target + KP * error + KI * integral
+7. Motor_Set(id, command)
+
+Constants:
+
+    KP = 0.5
+    KI = 0.1
+
+Integral limit:
+
+    MOTOR_ILIMIT = MOTOR_MAX_SPEED_MMPS * 0.5
+
+Notes:
+    This is a simple PI controller with feed-forward target speed.
+    There is no derivative term.
+    Encoder feedback is required for accurate speed control.
+
+
+============================================================
+18. ENCODER SYSTEM
+============================================================
+
+Files:
+    Src/encoder.c
+    Inc/encoder.h
+
+The STM32 does not directly count encoder pulses in this firmware.
+Instead, it communicates with an ESP32 over I2C.
+
+ESP32 I2C address:
+    ESP32_ENCODER_ADDR = 0x30 << 1
+
+I2C bus:
+    I2C1
+
+STM32 pins:
+    PB8 = I2C1_SCL
+    PB9 = I2C1_SDA
+
+Data from ESP32:
+
+    ESP32_READ_LEN = 36 bytes
+
+Byte layout:
+
+    Bytes 0-3:
+        status flags as uint32_t
+        bit0 = ESP32 alive
+        bit1 = wheel data valid
+
+    Bytes 4-7:
+        FL ticks as int32_t
+
+    Bytes 8-11:
+        FR ticks as int32_t
+
+    Bytes 12-15:
+        RL ticks as int32_t
+
+    Bytes 16-19:
+        RR ticks as int32_t
+
+    Bytes 20-23:
+        FL velocity as float
+
+    Bytes 24-27:
+        FR velocity as float
+
+    Bytes 28-31:
+        RL velocity as float
+
+    Bytes 32-35:
+        RR velocity as float
+
+Data sent to ESP32:
+
+    ESP32_WRITE_LEN = 4 bytes
+
+These 4 bytes contain motor/encoder direction states.
+
+Wheel constants:
+
+    ENC_TICKS_PER_REV = 2264
+    ENC_WHEEL_CIRC_MM = 26.70 mm
+    ENC_MM_PER_TICK = 26.70 / 2264
+    ENC_WHEELBASE_MM = 200.0 mm
+
+Encoder_Update():
+
+1. If directions changed, transmit new directions to ESP32.
+2. Receive 36 bytes from ESP32.
+3. Decode ticks.
+4. Convert ticks to distance in mm.
+5. Decode wheel velocities.
+6. Use the status word to decide whether ESP32 and wheel feedback are valid.
+
+Encoder access functions:
+
+    Encoder_VelMmps(idx)
+    Encoder_DistMm(idx)
+    Encoder_Ticks(idx)
+
+
+============================================================
+19. LCD DASHBOARD
+============================================================
+
+File:
+    Src/lcd_display.c
+
+Display:
+    STM32F746 Discovery LCD
+
+Resolution:
+    480 x 272
+
+Framebuffer address:
+    0xC0000000
+
+LCD_Display_Init():
+
+1. Enables LCD panel pins:
+       PI12
+       PK3
+
+2. Clears background.
+3. Draws title:
+       STM32F7 TERRAIN BOT
+
+4. Draws section labels:
+       IMU
+       WHEELS
+       SYSTEM
+
+LCD_Display_Update():
+
+Displays:
+
+1. State:
+       CALIB or RUN
+
+2. IMU attitude:
+       Roll
+       Pitch
+       Yaw
+
+3. Wheel velocities:
+       FL, FR, RL, RR
+
+4. PWM duty:
+       Current duty for each motor
+
+5. Safety risk:
+       Numeric value
+       Colored bar
+
+6. System status:
+       ENC OK/FAIL
+       ROS OK/WAIT
+
+7. Acceleration:
+       ax, ay, az
+
+8. Pitch bar:
+       Bar from -45 deg to +45 deg
+
+Color meaning:
+
+    Green:
+        normal / OK
+
+    Amber:
+        warning / waiting / medium risk
+
+    Red:
+        high risk
+
+
+============================================================
+20. PUBLISHED ROS TOPICS
+============================================================
+
+Topic:
+    /imu/data
+
+Type:
+    sensor_msgs/msg/Imu
+
+Published fields:
+    header.stamp from HAL_GetTick()
+    frame_id = imu_link
+    orientation quaternion from Madgwick filter
+    angular_velocity from gyro minus bias
+    linear_acceleration from IMU
+    covariance values
+
+Publish rate:
+    100 Hz
+
+
+Topic:
+    /wheel_ticks
+
+Type:
+    std_msgs/msg/Int32MultiArray
+
+Data:
+    4 integer tick counts:
+        FL, FR, RL, RR
+
+Publish rate:
+    50 Hz
+
+
+Topic:
+    /wheel_velocity
+
+Type:
+    std_msgs/msg/Float32MultiArray
+
+Data:
+    4 float wheel speeds in mm/s:
+        FL, FR, RL, RR
+
+Publish rate:
+    50 Hz
+
+
+============================================================
+21. SUBSCRIBED ROS TOPIC
+============================================================
+
+Topic:
+    /cmd_vel
+
+Type:
+    geometry_msgs/msg/Twist
+
+Used fields:
+    linear.x
+    angular.z
+
+Ignored fields:
+    linear.y
+    linear.z
+    angular.x
+    angular.y
+
+Meaning:
+    linear.x controls forward/backward motion.
+    angular.z controls turning.
+
+
+============================================================
+22. ERROR HANDLING
+============================================================
+
+Error_Handler() is in main.c.
+
+When called:
+
+1. Interrupts are disabled.
+2. Firmware enters infinite loop.
+
+This usually happens if:
+
+1. Clock configuration fails.
+2. Peripheral initialization fails.
+3. IMU initialization fails.
+4. micro-ROS initialization function returns an error.
+
+In current code, there is no LED blink or LCD error message in Error_Handler().
+So if it freezes during startup, debugging is needed to know which init failed.
+
+
+============================================================
+23. SYSTEM CALLS AND BUILD WARNING FIX
+============================================================
+
+The linker warning was:
+
+    _gettimeofday is not implemented and will always fail
+
+Cause:
+    Newlib nano C library expected _gettimeofday().
+
+Fix added:
+    Src/syscalls.c now implements _gettimeofday().
+
+Implementation:
+    Uses HAL_GetTick().
+    Converts milliseconds since boot into:
+        tv_sec
+        tv_usec
+
+Important:
+    This is uptime, not real calendar date/time.
+
+If real wall clock time is required later:
+    Use RTC, GPS time, or synchronized ROS time.
+
+
+============================================================
+24. BUILD MODE
+============================================================
+
+The project includes micro-ROS code guarded by:
+
+    #ifdef USE_MICROROS
+
+If USE_MICROROS is defined:
+    ROS code is compiled.
+    libmicroros must be linked.
+    ROS headers must be available.
+
+If USE_MICROROS is not defined:
+    ROS code is removed at compile time.
+    The robot can still read IMU, read encoders, run motor control, run safety logic, and update LCD.
+
+Current build command from Debug makefile links:
+
+    -lmicroros
+
+Library path:
+
+    Middlewares/micro_ros_stm32cubemx_utils/microros_static_library_ide/libmicroros
+
+
+============================================================
+25. IMPORTANT HARDWARE CONNECTIONS
+============================================================
+
+I2C1:
+    PB8 = SCL
+    PB9 = SDA
+
+I2C devices:
+    ICM20948 IMU at 0x68
+    ESP32 encoder interface at 0x30
+
+USART6:
+    PC6 = TX
+    PC7 = RX
+    Baud = 115200
+
+PWM pins:
+    PF6  = TIM10_CH1
+    PF7  = TIM11_CH1
+    PF8  = TIM13_CH1
+    PF9  = TIM14_CH1
+    PH6  = TIM12_CH1
+    PB15 = TIM12_CH2
+    PB4  = TIM3_CH1
+    PA15 = TIM2_CH1
+
+LCD/framebuffer:
+    Uses FMC/LTDC/DMA2D setup.
+    Framebuffer starts at 0xC0000000.
+
+
+============================================================
+26. IMPORTANT CONSTANTS
+============================================================
+
+Task timing:
+
+    IMU_MS       = 10
+    ENC_MS       = 20
+    PID_MS       = 10
+    PUB_IMU_MS   = 10
+    PUB_ENC_MS   = 20
+    LCD_MS       = 100
+    WDG_MS       = 500
+
+IMU:
+
+    CALIB_N = 200
+    MADGWICK_BETA = 0.033
+
+Safety:
+
+    S_SAFE = 10 deg
+    S_CRIT = 30 deg
+    S_ESTOP_P = 30 deg
+    S_ESTOP_R = 40 deg
+
+Motor:
+
+    MOTOR_MAX_SPEED_MMPS = 44.5
+    MOTOR_RAMP_STEP = 200
+    KP = 0.5
+    KI = 0.1
+
+Encoder:
+
+    ENC_TICKS_PER_REV = 2264
+    ENC_WHEEL_CIRC_MM = 26.70
+    ENC_WHEELBASE_MM = 200.0
+
+
+============================================================
+27. HOW THE COMPLETE ROBOT BEHAVES
+============================================================
+
+Startup:
+
+1. STM32 boots.
+2. Hardware initializes.
+3. LCD turns on.
+4. IMU is checked.
+5. Encoder interface is initialized.
+6. Motor PWM starts with zero duty.
+7. micro-ROS waits for the agent if enabled.
+8. IMU calibrates.
+9. Robot enters RUN state.
+
+During running:
+
+1. ROS sends /cmd_vel.
+2. STM32 converts /cmd_vel to left/right wheel speed.
+3. Encoder feedback gives actual wheel velocity.
+4. PI controller adjusts motor PWM.
+5. IMU estimates roll/pitch.
+6. Safety logic calculates terrain risk.
+7. Motor output is reduced when risk rises.
+8. Motors stop if tilt is dangerous or command watchdog expires.
+9. LCD shows live status.
+10. ROS receives IMU and encoder data.
+
+
+============================================================
+28. LIMITATIONS / THINGS TO WATCH
+============================================================
+
+1. Magnetometer yaw correction is not fully used.
+    Madgwick_UpdateMARG() currently falls back to IMU-only update.
+    Yaw can drift over time.
+
+2. _gettimeofday() and clock_gettime() use uptime only.
+    They do not provide real date/time.
+
+3. Error_Handler() freezes silently.
+    Adding LED blink or LCD error code would make debugging easier.
+
+4. micro-ROS setup blocks until agent is found.
+    If the agent is not running, firmware waits inside uros_setup().
+
+5. Encoder data depends on ESP32 protocol.
+    STM32 expects exactly 32 bytes in a fixed binary format.
+    ESP32 must match the same endian and float format.
+
+6. Motor direction depends on wiring.
+    If a motor spins opposite, either wiring or software direction mapping must be changed.
+
+7. The motor speed limit is low:
+    MOTOR_MAX_SPEED_MMPS = 44.5 mm/s.
+    This may be intentional for testing or safety.
+
+8. IMU calibration requires stillness.
+    Moving the robot during calibration causes bad bias values.
+
+9. I2C pullups are required.
+    PB8/PB9 are configured with GPIO_NOPULL, so external pullups are expected.
+
+
+============================================================
+29. GOOD DEBUGGING CHECKLIST
+============================================================
+
+If firmware freezes at startup:
+    Check IMU wiring and address.
+    Check WHO_AM_I returns 0xEA.
+    Check micro-ROS agent is running if USE_MICROROS is enabled.
+
+If motors do not move:
+    Check /cmd_vel is being received.
+    Check ROS status on LCD.
+    Check command watchdog.
+    Check motor PWM pins.
+    Check motor driver enable pins/power.
+    Check safety risk is not 1.0.
+
+If motors stop after 500 ms:
+    /cmd_vel is not being received continuously.
+    Publish /cmd_vel at more than 2 Hz, preferably 10 Hz or higher.
+
+If encoder fails:
+    Check ESP32 I2C address 0x30.
+    Check PB8/PB9 wiring.
+    Check pullups.
+    Check ESP32 sends 32 bytes.
+
+If ROS does not connect:
+    Check UART6 pins PC6/PC7.
+    Check baud rate 115200.
+    Check TX/RX crossed correctly between STM32 and USB-serial/Raspberry Pi.
+    Check micro-ROS agent command.
+
+If attitude values are wrong:
+    Keep robot still during calibration.
+    Check IMU orientation.
+    Check accelerometer units.
+    Check gyro bias values.
+
+
+============================================================
+30. ONE LINE DESCRIPTION
+============================================================
+
+This code makes the STM32F746 Discovery work as the real-time motor, sensor, safety, display, and micro-ROS controller for a four-wheel terrain robot.

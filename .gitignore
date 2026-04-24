@@ -1,0 +1,20 @@
+# Nested repositories kept independent from this top-level workspace repo
+_terrain_ws_check/
+_terrain_bot_source/
+_raspberry_pi4b_check/
+stm32f7disco/Middlewares/micro_ros_stm32cubemx_utils/
+
+# STM32 generated/build outputs
+stm32f7disco/Debug/
+stm32f7disco/Debug_*/
+stm32f7disco/*.launch
+stm32f7disco/.platformio_core/
+stm32f7disco/.settings/
+
+# Python/cache artifacts
+__pycache__/
+*.pyc
+
+# Local metadata
+.metadata/
+.claude/
