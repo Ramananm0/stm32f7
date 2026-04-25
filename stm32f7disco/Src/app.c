@@ -10,7 +10,6 @@
 #include "usart.h"
 
 #include <math.h>
-#include <stdlib.h>
 #include <string.h>
 
 #ifdef USE_MICROROS
@@ -51,12 +50,6 @@ extern TIM_HandleTypeDef htim14;
 #define UROS_PING_TIMEOUT_MS 300u
 #define UROS_PING_ATTEMPTS   10u
 #define UROS_STARTUP_DELAY_MS 500u
-#define MOTOR_BOOT_TEST_RUN_MS     800u
-#define MOTOR_BOOT_TEST_STOP_MS    300u
-#define MOTOR_BOOT_NORMALIZE_DUTY_PERCENT 40u
-#define MOTOR_BOOT_NORMALIZE_POLL_MS      50u
-#define MOTOR_BOOT_NORMALIZE_TIMEOUT_MS  5000u
-#define MOTOR_BOOT_NORMALIZE_TICKS        48
 #define DIAG_ENC_MS               100u
 #define DIAG_MOTOR_RUN_MS       15000u
 #define DIAG_MOTOR_STOP_MS        500u
@@ -387,19 +380,6 @@ static void motor_pid(float dt)
     }
 }
 
-static void refresh_encoder_status(void)
-{
-    if (Encoder_Update() == HAL_OK) {
-        g_esp32_ok = Encoder_Esp32Connected();
-        g_wheels_ok = Encoder_WheelsConnected();
-        g_encoder_feedback_ok = (g_esp32_ok && g_wheels_ok) ? 1u : 0u;
-    } else {
-        g_esp32_ok = 0u;
-        g_wheels_ok = 0u;
-        g_encoder_feedback_ok = 0u;
-    }
-}
-
 static void update_normal_mode_targets(uint32_t now)
 {
     (void)now;
@@ -408,65 +388,9 @@ static void update_normal_mode_targets(uint32_t now)
         return;
     }
 
-    if (g_emergency_stop) {
-        memset(g_target, 0, sizeof(g_target));
-        return;
-    }
-
-    /* Keep the rover stationary until ROS is online and sending commands. */
+    /* Keep the rover stationary until ROS is online and sending fresh commands. */
     memset(g_target, 0, sizeof(g_target));
-}
-
-static void startup_motor_check(void)
-{
-    int32_t baseline[MOTOR_NUM];
-    uint32_t start_ms;
-    uint32_t poll_ms;
-    uint8_t motion_ok = 0u;
-
-    refresh_encoder_status();
-    for (uint8_t i = 0; i < MOTOR_NUM; i++) {
-        baseline[i] = Encoder_Ticks(i);
-        Motor_SetTestDuty((Motor_ID)i, MOTOR_BOOT_NORMALIZE_DUTY_PERCENT, 1u);
-    }
-
-    LCD_Display_BootMotorTest("ENC NORM FWD");
-    start_ms = HAL_GetTick();
-    poll_ms = start_ms;
-
-    while ((HAL_GetTick() - start_ms) < MOTOR_BOOT_NORMALIZE_TIMEOUT_MS) {
-        uint32_t now = HAL_GetTick();
-        uint8_t moved = 1u;
-
-        if (now - poll_ms < MOTOR_BOOT_NORMALIZE_POLL_MS) {
-            HAL_Delay(5u);
-            continue;
-        }
-
-        poll_ms = now;
-        refresh_encoder_status();
-        if (!g_encoder_feedback_ok) {
-            continue;
-        }
-
-        for (uint8_t i = 0; i < MOTOR_NUM; i++) {
-            if (labs(Encoder_Ticks(i) - baseline[i]) < MOTOR_BOOT_NORMALIZE_TICKS) {
-                moved = 0u;
-                break;
-            }
-        }
-
-        if (moved) {
-            motion_ok = 1u;
-            break;
-        }
-    }
-
-    Motor_StopAll();
-    HAL_Delay(MOTOR_BOOT_TEST_STOP_MS);
-    refresh_encoder_status();
-    LCD_Display_BootMotorTest(motion_ok ? "ENC NORM OK" : "ENC NORM FAIL");
-    HAL_Delay(MOTOR_BOOT_TEST_STOP_MS);
+    memset(g_integral, 0, sizeof(g_integral));
 }
 
 #ifdef USE_MICROROS
@@ -778,11 +702,17 @@ void App_Run(void)
     uint32_t t_ros_retry;
     uint8_t enc_fail_count;
     uint8_t filter_seeded;
+    uint8_t last_host_ok;
 
     g_debug_stage = 10u;
     LCD_Display_Init();
     g_debug_stage = 20u;
     LCD_Display_BootStatus(0u, 0u, 0u);
+
+    g_debug_stage = 25u;
+    g_ros_ok = 0u;
+    uros_setup();
+    LCD_Display_BootStatus(0u, 0u, g_ros_ok);
 
     g_debug_stage = 30u;
     Encoder_Init(&hi2c1);
@@ -796,13 +726,12 @@ void App_Run(void)
     g_slip_alert = 0u;
     memset(g_measured_filt, 0, sizeof(g_measured_filt));
     memset(g_wheel_slip, 0, sizeof(g_wheel_slip));
-    refresh_encoder_status();
     g_imu_ok = 0u;
-    LCD_Display_BootStatus(g_imu_ok, g_esp32_ok, 0u);
+    LCD_Display_BootStatus(g_imu_ok, g_esp32_ok, g_ros_ok);
 
     g_debug_stage = 40u;
     Motor_Init(&htim10, &htim11, &htim12, &htim13, &htim14, &htim2, &htim3);
-    startup_motor_check();
+    Motor_StopAll();
 
     g_debug_stage = 50u;
     g_imu_ok = ICM20948_Init(&hi2c1) == HAL_OK ? 1u : 0u;
@@ -810,8 +739,7 @@ void App_Run(void)
 
     Madgwick_Init(&ahrs, MADGWICK_BETA);
     g_debug_stage = 60u;
-    g_ros_ok = 0u;
-    LCD_Display_BootStatus(g_imu_ok, g_esp32_ok, 0u);
+    LCD_Display_BootStatus(g_imu_ok, g_esp32_ok, g_ros_ok);
     HAL_Delay(1500);
 
     g_debug_stage = 70u;
@@ -844,12 +772,19 @@ void App_Run(void)
     t_ros_retry = HAL_GetTick();
     enc_fail_count = 0u;
     filter_seeded = (g_imu_ok && calib.done) ? 1u : 0u;
+    last_host_ok = 0u;
 
     while (1) {
         uint32_t now = HAL_GetTick();
         g_debug_heartbeat++;
 
-        g_host_ok = g_ros_ok ? (((now - g_cmd_ms) <= WDG_MS) ? 1u : 0u) : 1u;
+        g_host_ok = (g_ros_ok && ((now - g_cmd_ms) <= WDG_MS)) ? 1u : 0u;
+        if (!g_host_ok && last_host_ok) {
+            memset(g_target, 0, sizeof(g_target));
+            memset(g_integral, 0, sizeof(g_integral));
+            Motor_StopAll();
+        }
+        last_host_ok = g_host_ok;
         update_normal_mode_targets(now);
 
         if (!g_ros_ok && now - t_ros_retry >= ROS_RETRY_MS) {
@@ -938,7 +873,6 @@ void App_Run(void)
             if (!g_host_ok) {
                 memset(g_target, 0, sizeof(g_target));
                 memset(g_integral, 0, sizeof(g_integral));
-                Motor_StopAll();
             } else {
                 motor_pid(dt);
             }
