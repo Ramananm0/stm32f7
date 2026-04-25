@@ -1,0 +1,71 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+
+Visualization Manager:
+  Global Options:
+    Fixed Frame: odom
+    Frame Rate: 30
+    Background Color:
+      r: 0.05
+      g: 0.05
+      b: 0.05
+
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 0.5
+      Color:
+        r: 0.3
+        g: 0.3
+        b: 0.3
+
+    - Class: rviz_default_plugins/Map
+      Name: SLAM Map
+      Enabled: true
+      Alpha: 0.8
+      Topic:
+        Value: /map
+
+    - Class: rviz_default_plugins/LaserScan
+      Name: LiDAR
+      Enabled: true
+      Topic:
+        Value: /scan
+      Size (m): 0.04
+      Color:
+        r: 1.0
+        g: 0.3
+        b: 0.0
+
+    - Class: rviz_default_plugins/Odometry
+      Name: Odometry Path
+      Enabled: true
+      Topic:
+        Value: /odometry/filtered
+      Keep: 200
+
+    - Class: rviz_default_plugins/Image
+      Name: Camera (ORB-SLAM3)
+      Enabled: false
+      Topic:
+        Value: /camera/image_raw
+
+    - Class: rviz_default_plugins/Axes
+      Name: Robot Origin
+      Enabled: true
+      Length: 0.3
+
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: false
+
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Scale: 60.0
+      X: 0.0
+      Y: 0.0
