@@ -52,6 +52,7 @@ HAL_StatusTypeDef Encoder_Update(void)
     if (status != HAL_OK) {
         clear_samples();
         g_status = 0u;
+        g_dirs_dirty = 1u;
         return status;
     }
 

@@ -27,9 +27,9 @@
 #define ENC_RIGHT  ENC_FR
 
 #define ENC_TICKS_PER_REV    2264u
-#define ENC_WHEEL_CIRC_MM    26.70f
+#define ENC_WHEEL_CIRC_MM    267.04f   /* π × 85 mm wheel diameter */
 #define ENC_MM_PER_TICK      (ENC_WHEEL_CIRC_MM / (float)ENC_TICKS_PER_REV)
-#define ENC_WHEELBASE_MM     200.0f
+#define ENC_WHEELBASE_MM     200.0f    /* left-to-right wheel centre distance — measure and update */
 
 #if (ESP32_READ_LEN != 36u)
 #error "Encoder frame size must remain 36 bytes"

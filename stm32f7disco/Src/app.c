@@ -44,8 +44,9 @@ extern TIM_HandleTypeDef htim14;
 #define I2C_RECOVER_MS 100u
 #define ENC_FAIL_DISABLE_COUNT 3u
 #define IMU_RETRY_MS 500u
-#define ROS_RETRY_MS 500u
-#define ROS_SPIN_MS  5u
+#define ROS_RETRY_MS  500u
+#define ROS_SPIN_MS   5u
+#define ROS_PING_MS   5000u
 #define CALIB_N     200u
 #define UROS_PING_TIMEOUT_MS 300u
 #define UROS_PING_ATTEMPTS   10u
@@ -124,6 +125,7 @@ static int32_t tick_buf[MOTOR_NUM];
 static float vel_buf[MOTOR_NUM];
 static int32_t status_buf[5];
 static char frame_id[] = "imu_link";
+static uint8_t g_uros_allocated;
 #endif
 
 static ICM20948_Data imu;
@@ -477,9 +479,29 @@ static void uros_setup(void)
 
     g_debug_stage = 220u;
     g_ros_ok = 1u;
+    g_uros_allocated = 1u;
+}
+
+static void uros_teardown(void)
+{
+    if (!g_uros_allocated) {
+        return;
+    }
+    g_uros_allocated = 0u;
+    (void)rcl_publisher_fini(&pub_imu,    &node);
+    (void)rcl_publisher_fini(&pub_ticks,  &node);
+    (void)rcl_publisher_fini(&pub_vel,    &node);
+    (void)rcl_publisher_fini(&pub_status, &node);
+    (void)rcl_subscription_fini(&sub_cmd, &node);
+    (void)rclc_executor_fini(&exec);
+    (void)rcl_node_fini(&node);
+    (void)rclc_support_fini(&support);
 }
 #else
 static void uros_setup(void)
+{
+}
+static void uros_teardown(void)
 {
 }
 #endif
@@ -700,6 +722,7 @@ void App_Run(void)
     uint32_t t_i2c_recover;
     uint32_t t_imu_retry;
     uint32_t t_ros_retry;
+    uint32_t t_ros_ping;
     uint8_t enc_fail_count;
     uint8_t filter_seeded;
     uint8_t last_host_ok;
@@ -770,6 +793,7 @@ void App_Run(void)
     t_i2c_recover = HAL_GetTick();
     t_imu_retry = HAL_GetTick();
     t_ros_retry = HAL_GetTick();
+    t_ros_ping  = HAL_GetTick();
     enc_fail_count = 0u;
     filter_seeded = (g_imu_ok && calib.done) ? 1u : 0u;
     last_host_ok = 0u;
@@ -789,8 +813,20 @@ void App_Run(void)
 
         if (!g_ros_ok && now - t_ros_retry >= ROS_RETRY_MS) {
             t_ros_retry = now;
+            t_ros_ping  = now;
+            uros_teardown();
             uros_setup();
         }
+
+#ifdef USE_MICROROS
+        if (g_ros_ok && now - t_ros_ping >= ROS_PING_MS) {
+            t_ros_ping = now;
+            if (rmw_uros_ping_agent(100, 1) != RMW_RET_OK) {
+                g_ros_ok = 0u;
+                g_ros_error = -10;
+            }
+        }
+#endif
 
         if (!g_imu_ok && now - t_imu_retry >= IMU_RETRY_MS) {
             t_imu_retry = now;
@@ -859,10 +895,10 @@ void App_Run(void)
                 if (enc_fail_count < 0xFFu) {
                     enc_fail_count++;
                 }
-                if (enc_fail_count < ENC_FAIL_DISABLE_COUNT &&
-                    now - t_i2c_recover >= I2C_RECOVER_MS) {
+                if (now - t_i2c_recover >= I2C_RECOVER_MS) {
                     t_i2c_recover = now;
                     I2C1_Recover();
+                    Encoder_Init(&hi2c1);
                 }
             }
         }
