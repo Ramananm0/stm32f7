@@ -19,7 +19,7 @@ static uint32_t g_current_duty[MOTOR_NUM];
  * FR and RR are used as the baseline; FL and RL are scaled down to
  * match their observed breakaway/drive strength.
  */
-static const uint8_t g_trim_percent[MOTOR_NUM] = {94u, 100u, 81u, 100u};
+static const uint8_t g_trim_percent[MOTOR_NUM] = {94u, 95u, 100u, 98u};
 
 static void set_pwm(TIM_HandleTypeDef *htim, uint32_t channel, uint32_t duty)
 {
@@ -111,12 +111,12 @@ static void write_motor_channels(Motor_ID id, uint32_t duty, uint8_t forward)
         set_pwm(g_tim11, TIM_CHANNEL_1, forward ? duty : 0u);
         break;
     case MOTOR_FR:
-        set_pwm(g_tim13, TIM_CHANNEL_1, forward ? 0u : duty);
-        set_pwm(g_tim14, TIM_CHANNEL_1, forward ? duty : 0u);
+        set_pwm(g_tim13, TIM_CHANNEL_1, forward ? duty : 0u);
+        set_pwm(g_tim14, TIM_CHANNEL_1, forward ? 0u : duty);
         break;
     case MOTOR_RL:
-        set_pwm(g_tim12, TIM_CHANNEL_2, forward ? 0u : duty);
         set_pwm(g_tim12, TIM_CHANNEL_1, forward ? duty : 0u);
+        set_pwm(g_tim12, TIM_CHANNEL_2, forward ? 0u : duty);
         break;
     case MOTOR_RR:
         set_pwm(g_tim3, TIM_CHANNEL_1, forward ? 0u : duty);
@@ -188,6 +188,7 @@ void Motor_Set(Motor_ID id, float vel_mmps)
     forward = vel_mmps >= 0.0f ? 1u : 0u;
     abs_vel = fabsf(vel_mmps);
     max_duty = max_duty_for_motor(id);
+    max_duty = (max_duty * MOTOR_COMMAND_DUTY_LIMIT_PCT) / 100u;
     duty = (uint32_t)((abs_vel / MOTOR_MAX_SPEED_MMPS) * (float)max_duty);
     duty = apply_trim(id, duty);
 
@@ -214,8 +215,6 @@ void Motor_SetTestDuty(Motor_ID id, uint8_t duty_percent, uint8_t forward)
 
 void Motor_StopAll(void)
 {
-    uint8_t dirs[MOTOR_NUM] = {0, 0, 0, 0};
-
     if (!g_ready) {
         return;
     }
@@ -231,7 +230,6 @@ void Motor_StopAll(void)
 
     memset(g_current_duty, 0, sizeof(g_current_duty));
     memset(g_dir, 0, sizeof(g_dir));
-    Encoder_SendDirections(dirs);
 }
 
 int8_t Motor_GetDirection(Motor_ID id)

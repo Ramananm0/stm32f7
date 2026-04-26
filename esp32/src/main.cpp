@@ -22,8 +22,8 @@
 #define WHEEL_DIAMETER_MM 85.0f
 #define ENCODER_TICKS_PER_REV 2264.0f
 
-static const int ENC_A_PINS[ENC_NUM] = {16, 18, 25, 32};
-static const int ENC_B_PINS[ENC_NUM] = {17, 19, 26, 33};
+static const int ENC_A_PINS[ENC_NUM] = { 4, 18, 25, 32};  /* FL=4  (was 16=RX2) */
+static const int ENC_B_PINS[ENC_NUM] = {13, 19, 26, 33};  /* FL=13 (was 17=TX2) */
 static const pcnt_unit_t PCNT_UNITS[ENC_NUM] = {
     PCNT_UNIT_0, PCNT_UNIT_1, PCNT_UNIT_2, PCNT_UNIT_3
 };

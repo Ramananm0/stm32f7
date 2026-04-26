@@ -17,8 +17,7 @@ check() {
 }
 
 check micro-ros-agent
-check rplidar
-check terrain-bringup 2>/dev/null || true
+check terrain-bringup
 
 echo ""
 echo "=== Serial Devices ==="

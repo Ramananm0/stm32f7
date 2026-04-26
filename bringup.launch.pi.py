@@ -4,7 +4,7 @@ bringup.launch.py  —  Full Raspberry Pi 4B hardware launch
 
 Start order and data flow:
 ──────────────────────────────────────────────────────────────────────
-  STM32F746G  ──USB-TTL──►  micro_ros_agent
+  STM32F746G  ──USB CDC / UART──►  micro_ros_agent
                                 ├─► /imu/data        (100 Hz)
                                 ├─► /wheel_ticks     ( 50 Hz)
                                 └─► /wheel_velocity  ( 50 Hz)
@@ -59,8 +59,8 @@ def generate_launch_description():
 
     # ── 1. micro-ROS agent  (STM32 ↔ ROS2 bridge) ─────────────────────────────
     # Skip micro_ros_agent if /dev/stm32 resolves to the same device as
-    # /dev/rplidar — that means the STM32 USB adapter isn't connected and
-    # opening /dev/stm32 would block the RPLidar port.
+    # /dev/rplidar — that means the STM32 transport endpoint is not distinct
+    # and opening /dev/stm32 would block the RPLidar port.
     def _same_device(a, b):
         try:
             return os.path.realpath(a) == os.path.realpath(b)

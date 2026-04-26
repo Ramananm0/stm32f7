@@ -1,0 +1,427 @@
+diff --git a/stm32f7disco/Inc/motor.h b/stm32f7disco/Inc/motor.h
+index c8673a9..5bc6761 100644
+--- a/stm32f7disco/Inc/motor.h
++++ b/stm32f7disco/Inc/motor.h
+@@ -12,9 +12,9 @@ typedef enum {
+     MOTOR_NUM = 4
+ } Motor_ID;
+ 
+-#define MOTOR_MAX_SPEED_MMPS   44.5f
+-#define MOTOR_RAMP_STEP          200u
+-#define MOTOR_ILIMIT           (MOTOR_MAX_SPEED_MMPS * 0.5f)
++#define MOTOR_MAX_SPEED_MMPS          44.5f
++#define MOTOR_COMMAND_DUTY_LIMIT_PCT   100u
++#define MOTOR_RAMP_STEP                200u
+ 
+ void Motor_Init(TIM_HandleTypeDef *htim10,
+                 TIM_HandleTypeDef *htim11,
+diff --git a/stm32f7disco/Src/app.c b/stm32f7disco/Src/app.c
+index d6a8896..3a282c5 100644
+--- a/stm32f7disco/Src/app.c
++++ b/stm32f7disco/Src/app.c
+@@ -52,9 +52,9 @@ extern TIM_HandleTypeDef htim14;
+ #define UROS_PING_ATTEMPTS   10u
+ #define UROS_STARTUP_DELAY_MS 500u
+ #define DIAG_ENC_MS               100u
+-#define DIAG_MOTOR_RUN_MS       15000u
++#define DIAG_MOTOR_RUN_MS        1000u
+ #define DIAG_MOTOR_STOP_MS        500u
+-#define DIAG_MOTOR_DUTY_PERCENT    55u
++#define DIAG_MOTOR_DUTY_PERCENT    15u
+ 
+ #define MADGWICK_BETA   0.033f
+ #define CF_ALPHA        0.98f
+@@ -72,23 +72,8 @@ extern TIM_HandleTypeDef htim14;
+ #define S_FLIP_P    (25.0f * 0.017453293f)
+ #define S_ESTOP_CONFIRM 5u
+ 
+-#define KP          0.5f
+-#define KI          0.1f
+-#define ENC_VEL_LPF_ALPHA        0.65f
+-#define SYNC_PAIR_K              0.20f
+-#define SYNC_STRAIGHT_K          0.10f
+-#define SYNC_DEADBAND_MMPS       1.0f
+ #define TARGET_STOP_EPS_MMPS     0.5f
+-#define SLIP_MIN_TARGET_MMPS     6.0f
+-#define SLIP_TARGET_EXCESS_MMPS  8.0f
+-#define SLIP_PAIR_DELTA_MMPS     10.0f
+-#define SLIP_SIDE_DELTA_MMPS     8.0f
+-#define SLIP_RISK_LPF_ALPHA      0.80f
+-#define SLIP_ALERT_THRESHOLD     0.45f
+ #define WDG_MS     2000u
+-#define NORMAL_FALLBACK_SPEED_MMPS  22.0f
+-#define NORMAL_FALLBACK_RUN_MS    3000u
+-#define NORMAL_FALLBACK_STOP_MS    750u
+ 
+ #define GY_COV      (0.00262f * 0.00262f)
+ #define AC_COV      (0.02256f * 0.02256f)
+@@ -123,7 +108,7 @@ static geometry_msgs__msg__Twist msg_cmd;
+ 
+ static int32_t tick_buf[MOTOR_NUM];
+ static float vel_buf[MOTOR_NUM];
+-static int32_t status_buf[5];
++static int32_t status_buf[7];
+ static char frame_id[] = "imu_link";
+ static uint8_t g_uros_allocated;
+ #endif
+@@ -133,13 +118,9 @@ static ICM20948_Calib calib;
+ static Madgwick_t ahrs;
+ 
+ static float g_tilt_risk;
+-static float g_slip_risk;
+ static float g_risk;
+ static float g_scale = 1.0f;
+ static float g_target[MOTOR_NUM];
+-static float g_integral[MOTOR_NUM];
+-static float g_measured_filt[MOTOR_NUM];
+-static float g_wheel_slip[MOTOR_NUM];
+ static uint32_t g_cmd_ms;
+ static uint32_t g_cmd_count;
+ static uint8_t g_esp32_ok;
+@@ -150,7 +131,6 @@ static uint8_t g_imu_ok;
+ static uint8_t g_ros_ok;
+ static uint8_t g_emergency_stop;
+ static uint8_t g_estop_count;
+-static uint8_t g_slip_alert;
+ volatile int32_t g_ros_error;
+ volatile uint32_t g_ros_rx_bytes;
+ volatile uint32_t g_ros_tx_bytes;
+@@ -194,10 +174,9 @@ static float clamp01f(float value)
+ 
+ static void update_combined_risk(void)
+ {
+-    float dominant_risk = g_tilt_risk > g_slip_risk ? g_tilt_risk : g_slip_risk;
+     float one_minus_risk;
+ 
+-    g_risk = clamp01f(dominant_risk);
++    g_risk = clamp01f(g_tilt_risk);
+     one_minus_risk = 1.0f - g_risk;
+     g_scale = one_minus_risk * one_minus_risk;
+ }
+@@ -248,137 +227,22 @@ static void update_safety(void)
+     update_combined_risk();
+ }
+ 
+-static void update_slip_risk(void)
++static void motor_control(void)
+ {
+-    float side_avg[2];
+-    uint8_t active_wheels = 0u;
+-    float slip_sum = 0.0f;
+-
+-    if (!g_encoder_feedback_ok) {
+-        memset(g_wheel_slip, 0, sizeof(g_wheel_slip));
+-        g_slip_risk = 0.0f;
+-        g_slip_alert = 0u;
+-        update_combined_risk();
+-        return;
+-    }
+-
+-    side_avg[0] = 0.5f * (fabsf(g_measured_filt[MOTOR_FL]) + fabsf(g_measured_filt[MOTOR_RL]));
+-    side_avg[1] = 0.5f * (fabsf(g_measured_filt[MOTOR_FR]) + fabsf(g_measured_filt[MOTOR_RR]));
+-
+-    for (uint8_t i = 0; i < MOTOR_NUM; i++) {
+-        float target_mag = fabsf(g_target[i] * g_scale);
+-        float measured_mag = fabsf(g_measured_filt[i]);
+-        float side_mag = (i == MOTOR_FL || i == MOTOR_RL) ? side_avg[0] : side_avg[1];
+-        float target_excess;
+-        float pair_mismatch;
+-        float wheel_slip;
+-
+-        if (target_mag < SLIP_MIN_TARGET_MMPS) {
+-            g_wheel_slip[i] = 0.0f;
+-            continue;
+-        }
+-
+-        active_wheels++;
+-        target_excess = clamp01f((measured_mag - target_mag) / SLIP_TARGET_EXCESS_MMPS);
+-        pair_mismatch = clamp01f(fabsf(measured_mag - side_mag) / SLIP_PAIR_DELTA_MMPS);
+-        wheel_slip = (0.6f * target_excess) + (0.4f * pair_mismatch);
+-        g_wheel_slip[i] = clamp01f(wheel_slip);
+-        slip_sum += g_wheel_slip[i];
+-    }
+-
+-    if (active_wheels == 0u) {
+-        memset(g_wheel_slip, 0, sizeof(g_wheel_slip));
+-        g_slip_risk = 0.0f;
+-        g_slip_alert = 0u;
+-        update_combined_risk();
+-        return;
+-    }
+-
+-    {
+-        float side_delta = clamp01f(fabsf(side_avg[0] - side_avg[1]) / SLIP_SIDE_DELTA_MMPS);
+-        float slip_mean = slip_sum / (float)active_wheels;
+-        float raw_slip_risk = clamp01f((0.7f * slip_mean) + (0.3f * side_delta));
+-        g_slip_risk = (SLIP_RISK_LPF_ALPHA * g_slip_risk) +
+-                      ((1.0f - SLIP_RISK_LPF_ALPHA) * raw_slip_risk);
+-    }
+-
+-    g_slip_alert = g_slip_risk >= SLIP_ALERT_THRESHOLD ? 1u : 0u;
+-    update_combined_risk();
+-}
+-
+-static void motor_pid(float dt)
+-{
+-    float side_avg[2];
+-    float straight_avg = 0.0f;
+-    uint8_t straight_mode;
+-
+-    if (!g_encoder_feedback_ok) {
+-        memset(g_integral, 0, sizeof(g_integral));
+-        memset(g_measured_filt, 0, sizeof(g_measured_filt));
+-        for (uint8_t i = 0; i < MOTOR_NUM; i++) {
+-            Motor_Set((Motor_ID)i, g_target[i] * g_scale);
+-        }
++    if (!g_host_ok || g_emergency_stop) {
++        Motor_StopAll();
+         return;
+     }
+ 
+     for (uint8_t i = 0; i < MOTOR_NUM; i++) {
+-        float measured = Encoder_VelMmps(i);
+-        g_measured_filt[i] = (ENC_VEL_LPF_ALPHA * g_measured_filt[i]) +
+-                             ((1.0f - ENC_VEL_LPF_ALPHA) * measured);
+-    }
+-
+-    update_slip_risk();
+-
+-    side_avg[0] = 0.5f * (g_measured_filt[MOTOR_FL] + g_measured_filt[MOTOR_RL]);
+-    side_avg[1] = 0.5f * (g_measured_filt[MOTOR_FR] + g_measured_filt[MOTOR_RR]);
+-    straight_mode =
+-        (fabsf(g_target[MOTOR_FL] - g_target[MOTOR_FR]) < 2.0f) &&
+-        ((g_target[MOTOR_FL] * g_target[MOTOR_FR]) >= 0.0f);
+-
+-    if (straight_mode) {
+-        for (uint8_t i = 0; i < MOTOR_NUM; i++) {
+-            straight_avg += g_measured_filt[i];
+-        }
+-        straight_avg *= 0.25f;
+-    }
+-
+-    for (uint8_t i = 0; i < MOTOR_NUM; i++) {
+-        float target = g_target[i] * g_scale;
+-        float measured = g_measured_filt[i];
+-        float pair_error;
+-        float sync_term = 0.0f;
+-        float error = target - measured;
+-        float command;
+-
+-        if (i == MOTOR_FL || i == MOTOR_RL) {
+-            pair_error = side_avg[0] - measured;
+-        } else {
+-            pair_error = side_avg[1] - measured;
+-        }
+-
+-        if (fabsf(pair_error) >= SYNC_DEADBAND_MMPS) {
+-            sync_term += SYNC_PAIR_K * pair_error;
+-        }
+-
+-        if (straight_mode) {
+-            float straight_error = straight_avg - measured;
+-            if (fabsf(straight_error) >= SYNC_DEADBAND_MMPS) {
+-                sync_term += SYNC_STRAIGHT_K * straight_error;
+-            }
+-        }
++        float target = g_target[i];
+ 
+         if (fabsf(target) < TARGET_STOP_EPS_MMPS) {
+-            g_integral[i] = 0.0f;
+             Motor_Set((Motor_ID)i, 0.0f);
+             continue;
+         }
+ 
+-        g_integral[i] += error * dt;
+-        if (g_integral[i] > MOTOR_ILIMIT) g_integral[i] = MOTOR_ILIMIT;
+-        if (g_integral[i] < -MOTOR_ILIMIT) g_integral[i] = -MOTOR_ILIMIT;
+-
+-        command = target + KP * error + KI * g_integral[i] + sync_term;
+-        Motor_Set((Motor_ID)i, command);
++        Motor_Set((Motor_ID)i, target * g_scale);
+     }
+ }
+ 
+@@ -392,7 +256,6 @@ static void update_normal_mode_targets(uint32_t now)
+ 
+     /* Keep the rover stationary until ROS is online and sending fresh commands. */
+     memset(g_target, 0, sizeof(g_target));
+-    memset(g_integral, 0, sizeof(g_integral));
+ }
+ 
+ #ifdef USE_MICROROS
+@@ -457,8 +320,8 @@ static void uros_setup(void)
+     msg_vel.data.size = MOTOR_NUM;
+     msg_vel.data.capacity = MOTOR_NUM;
+     msg_status.data.data = status_buf;
+-    msg_status.data.size = 5;
+-    msg_status.data.capacity = 5;
++    msg_status.data.size = 7;
++    msg_status.data.capacity = 7;
+ 
+     msg_imu.header.frame_id.data = frame_id;
+     msg_imu.header.frame_id.size = 8;
+@@ -573,7 +436,9 @@ static void publish_status(void)
+     status_buf[1] = (int32_t)g_wheels_ok;
+     status_buf[2] = (int32_t)g_imu_ok;
+     status_buf[3] = (int32_t)g_host_ok;
+-    status_buf[4] = (int32_t)g_cmd_count;
++    status_buf[4] = (int32_t)g_ros_ok;
++    status_buf[5] = (int32_t)g_emergency_stop;
++    status_buf[6] = (int32_t)g_cmd_count;
+ 
+     if (rcl_publish(&pub_status, &msg_status, NULL) != RCL_RET_OK) {
+         g_ros_ok = 0u;
+@@ -649,7 +514,6 @@ void App_MotorEsp32Diag_Run(void)
+     g_ros_ok = 0u;
+     g_host_ok = 1u;
+     g_tilt_risk = 0.0f;
+-    g_slip_risk = 0.0f;
+     g_risk = 0.0f;
+     g_scale = 1.0f;
+     g_esp32_ok = 0u;
+@@ -743,12 +607,8 @@ void App_Run(void)
+     g_wheels_ok = 0u;
+     g_encoder_feedback_ok = 0u;
+     g_tilt_risk = 0.0f;
+-    g_slip_risk = 0.0f;
+     g_risk = 0.0f;
+     g_scale = 1.0f;
+-    g_slip_alert = 0u;
+-    memset(g_measured_filt, 0, sizeof(g_measured_filt));
+-    memset(g_wheel_slip, 0, sizeof(g_wheel_slip));
+     g_imu_ok = 0u;
+     LCD_Display_BootStatus(g_imu_ok, g_esp32_ok, g_ros_ok);
+ 
+@@ -805,7 +665,6 @@ void App_Run(void)
+         g_host_ok = (g_ros_ok && ((now - g_cmd_ms) <= WDG_MS)) ? 1u : 0u;
+         if (!g_host_ok && last_host_ok) {
+             memset(g_target, 0, sizeof(g_target));
+-            memset(g_integral, 0, sizeof(g_integral));
+             Motor_StopAll();
+         }
+         last_host_ok = g_host_ok;
+@@ -836,7 +695,6 @@ void App_Run(void)
+                 memset(&imu, 0, sizeof(imu));
+                 filter_seeded = 0u;
+                 g_tilt_risk = 0.0f;
+-                g_slip_risk = 0.0f;
+                 g_risk = 0.0f;
+                 g_emergency_stop = 0u;
+                 g_estop_count = 0u;
+@@ -904,13 +762,12 @@ void App_Run(void)
+         }
+ 
+         if (now - t_pid >= PID_MS) {
+-            float dt = (float)(now - t_pid) * 0.001f;
+             t_pid = now;
+             if (!g_host_ok) {
+                 memset(g_target, 0, sizeof(g_target));
+-                memset(g_integral, 0, sizeof(g_integral));
++                Motor_StopAll();
+             } else {
+-                motor_pid(dt);
++                motor_control();
+             }
+         }
+ 
+diff --git a/stm32f7disco/Src/encoder.c b/stm32f7disco/Src/encoder.c
+index 5d6186b..1292d49 100644
+--- a/stm32f7disco/Src/encoder.c
++++ b/stm32f7disco/Src/encoder.c
+@@ -9,6 +9,11 @@ static uint8_t g_dirs_dirty;
+ static uint8_t g_initialised;
+ static uint32_t g_status;
+ 
++/* FL (0) and RR (3) have their encoder A/B phase inverted relative to the
++ * forward direction due to mirrored motor mounting. These flags are permanent
++ * and sent once to the ESP32 so its delta flip corrects the sign of vel_mmps. */
++static const uint8_t g_enc_reversed[ENC_NUM] = {1u, 0u, 0u, 1u};
++
+ static void clear_samples(void)
+ {
+     for (uint8_t i = 0; i < ENC_NUM; i++) {
+@@ -22,7 +27,10 @@ void Encoder_Init(I2C_HandleTypeDef *hi2c)
+ {
+     g_hi2c = hi2c;
+     memset(g_enc, 0, sizeof(g_enc));
+-    memset(g_dirs, 0, sizeof(g_dirs));
++    for (uint8_t i = 0; i < ENC_NUM; i++) {
++        g_dirs[i] = g_enc_reversed[i];
++        g_enc[i].direction = g_enc_reversed[i];
++    }
+     g_dirs_dirty = 1u;
+     g_initialised = 1u;
+     g_status = 0u;
+@@ -76,18 +84,11 @@ HAL_StatusTypeDef Encoder_Update(void)
+ 
+ void Encoder_SetDirection(uint8_t enc_id, uint8_t forward)
+ {
+-    uint8_t dir;
+-
+-    if (enc_id >= ENC_NUM) {
+-        return;
+-    }
+-
+-    dir = forward ? 0u : 1u;
+-    if (g_dirs[enc_id] != dir) {
+-        g_dirs[enc_id] = dir;
+-        g_enc[enc_id].direction = dir;
+-        g_dirs_dirty = 1u;
+-    }
++    /* Direction flags are permanent per-motor reversal constants set at init.
++     * The PCNT quadrature on the ESP32 tracks actual rotation direction; these
++     * flags only compensate for motors with physically inverted A/B phase. */
++    (void)enc_id;
++    (void)forward;
+ }
+ 
+ void Encoder_SendDirections(uint8_t directions[ENC_NUM])
+diff --git a/stm32f7disco/Src/motor.c b/stm32f7disco/Src/motor.c
+index 7c1d918..2f8b640 100644
+--- a/stm32f7disco/Src/motor.c
++++ b/stm32f7disco/Src/motor.c
+@@ -107,16 +107,16 @@ static void write_motor_channels(Motor_ID id, uint32_t duty, uint8_t forward)
+ {
+     switch (id) {
+     case MOTOR_FL:
+-        set_pwm(g_tim10, TIM_CHANNEL_1, forward ? 0u : duty);
+-        set_pwm(g_tim11, TIM_CHANNEL_1, forward ? duty : 0u);
++        set_pwm(g_tim10, TIM_CHANNEL_1, forward ? duty : 0u);
++        set_pwm(g_tim11, TIM_CHANNEL_1, forward ? 0u : duty);
+         break;
+     case MOTOR_FR:
+         set_pwm(g_tim13, TIM_CHANNEL_1, forward ? 0u : duty);
+         set_pwm(g_tim14, TIM_CHANNEL_1, forward ? duty : 0u);
+         break;
+     case MOTOR_RL:
+-        set_pwm(g_tim12, TIM_CHANNEL_2, forward ? 0u : duty);
+         set_pwm(g_tim12, TIM_CHANNEL_1, forward ? duty : 0u);
++        set_pwm(g_tim12, TIM_CHANNEL_2, forward ? 0u : duty);
+         break;
+     case MOTOR_RR:
+         set_pwm(g_tim3, TIM_CHANNEL_1, forward ? 0u : duty);
+@@ -188,6 +188,7 @@ void Motor_Set(Motor_ID id, float vel_mmps)
+     forward = vel_mmps >= 0.0f ? 1u : 0u;
+     abs_vel = fabsf(vel_mmps);
+     max_duty = max_duty_for_motor(id);
++    max_duty = (max_duty * MOTOR_COMMAND_DUTY_LIMIT_PCT) / 100u;
+     duty = (uint32_t)((abs_vel / MOTOR_MAX_SPEED_MMPS) * (float)max_duty);
+     duty = apply_trim(id, duty);
+ 
+@@ -214,8 +215,6 @@ void Motor_SetTestDuty(Motor_ID id, uint8_t duty_percent, uint8_t forward)
+ 
+ void Motor_StopAll(void)
+ {
+-    uint8_t dirs[MOTOR_NUM] = {0, 0, 0, 0};
+-
+     if (!g_ready) {
+         return;
+     }
+@@ -231,7 +230,6 @@ void Motor_StopAll(void)
+ 
+     memset(g_current_duty, 0, sizeof(g_current_duty));
+     memset(g_dir, 0, sizeof(g_dir));
+-    Encoder_SendDirections(dirs);
+ }
+ 
+ int8_t Motor_GetDirection(Motor_ID id)

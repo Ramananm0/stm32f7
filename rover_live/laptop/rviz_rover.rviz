@@ -6,7 +6,7 @@ Panels:
 
 Visualization Manager:
   Global Options:
-    Fixed Frame: odom
+    Fixed Frame: base_footprint
     Frame Rate: 30
     Background Color:
       r: 0.05
@@ -33,6 +33,7 @@ Visualization Manager:
     - Class: rviz_default_plugins/LaserScan
       Name: LiDAR
       Enabled: true
+      Queue Size: 50
       Topic:
         Value: /scan
       Size (m): 0.04

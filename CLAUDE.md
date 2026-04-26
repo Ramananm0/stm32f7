@@ -4,6 +4,30 @@
 
 This workspace is a terrain-robot development workspace centered on an STM32F746G-DISCO firmware project, with supporting ROS 2 simulation and Raspberry Pi runtime reference repos.
 
+## Active Baseline - 2026-04-25
+
+Use this folder, `/home/ramana/stm32f7_github_compare`, as the active project baseline.
+
+The previous local folder, `/home/ramana/stm32f7`, is not a Git repository and contains generated build outputs, runtime debug captures, nested reference repos, and local-only helper scripts. Treat it as an archive/reference source, not as the clean project root.
+
+Detailed comparison:
+
+- `FUNCTIONALITY_COMPARISON_2026-04-25.md`
+- Parent-level structural report: `/home/ramana/stm32f7_compare_report_2026-04-25.md`
+
+Code-wise, this clean GitHub clone is newer. In particular, it has encoder-aware motor PID, slip-risk logic, startup motor/encoder validation, a motor/ESP32 diagnostic mode, safer PWM duty handling, and lower-rate micro-ROS publishing for 115200 baud. The old local folder still contains temporary open-loop motor bring-up code in `stm32f7disco/Src/app.c` and should not be used as the firmware baseline.
+
+Initial project-start workflow:
+
+1. Work from `/home/ramana/stm32f7_github_compare`.
+2. Build the STM32 firmware from this clean clone.
+3. Verify whether micro-ROS middleware/static library content is present before enabling `USE_MICROROS`.
+4. Flash and test the GitHub firmware.
+5. Use `MOTOR_ESP32_DIAG_MODE` when validating motor and ESP32 encoder behavior.
+6. Bring up the Pi micro-ROS agent and verify `/base_status`, `/wheel_ticks`, `/wheel_velocity`, and `/cmd_vel`.
+7. Copy local-only scripts/docs from `/home/ramana/stm32f7` only after reviewing them for current relevance.
+8. Do not copy generated folders such as `Debug/`, `.metadata/`, `.platformio_core/`, `__pycache__/`, or live image snapshots into the clean repo unless explicitly needed.
+
 The top-level workspace contains:
 
 - `stm32f7disco/`: main STM32 firmware project

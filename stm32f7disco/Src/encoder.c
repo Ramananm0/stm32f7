@@ -9,6 +9,11 @@ static uint8_t g_dirs_dirty;
 static uint8_t g_initialised;
 static uint32_t g_status;
 
+/* FR (1) and RR (3) have their encoder A/B phase inverted relative to the
+ * forward direction. Measured with free-spinning forward run: FL/FR reported
+ * negative, RL/RR positive. Flipping FL→0 and FR→1 corrects all four signs. */
+static const uint8_t g_enc_reversed[ENC_NUM] = {0u, 1u, 0u, 1u};
+
 static void clear_samples(void)
 {
     for (uint8_t i = 0; i < ENC_NUM; i++) {
@@ -22,7 +27,10 @@ void Encoder_Init(I2C_HandleTypeDef *hi2c)
 {
     g_hi2c = hi2c;
     memset(g_enc, 0, sizeof(g_enc));
-    memset(g_dirs, 0, sizeof(g_dirs));
+    for (uint8_t i = 0; i < ENC_NUM; i++) {
+        g_dirs[i] = g_enc_reversed[i];
+        g_enc[i].direction = g_enc_reversed[i];
+    }
     g_dirs_dirty = 1u;
     g_initialised = 1u;
     g_status = 0u;
@@ -76,18 +84,11 @@ HAL_StatusTypeDef Encoder_Update(void)
 
 void Encoder_SetDirection(uint8_t enc_id, uint8_t forward)
 {
-    uint8_t dir;
-
-    if (enc_id >= ENC_NUM) {
-        return;
-    }
-
-    dir = forward ? 0u : 1u;
-    if (g_dirs[enc_id] != dir) {
-        g_dirs[enc_id] = dir;
-        g_enc[enc_id].direction = dir;
-        g_dirs_dirty = 1u;
-    }
+    /* Direction flags are permanent per-motor reversal constants set at init.
+     * The PCNT quadrature on the ESP32 tracks actual rotation direction; these
+     * flags only compensate for motors with physically inverted A/B phase. */
+    (void)enc_id;
+    (void)forward;
 }
 
 void Encoder_SendDirections(uint8_t directions[ENC_NUM])

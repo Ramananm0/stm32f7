@@ -111,6 +111,7 @@ ros2 node list
 ## UART / micro-ROS details
 
 - STM UART baud: `115200`
+- STM transport in source: `USART6`
 - STM UART pins:
   - `D1 / PC6 = USART6_TX`
   - `D0 / PC7 = USART6_RX`

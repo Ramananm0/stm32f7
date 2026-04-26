@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <participant profile_name="pi_peer_profile" is_default_profile="true">
+    <rtps>
+      <builtin>
+        <initialPeersList>
+          <locator>
+            <udpv4>
+              <address>100.88.254.75</address>
+              <port>7410</port>
+            </udpv4>
+          </locator>
+          <locator>
+            <udpv4>
+              <address>100.88.254.75</address>
+              <port>7412</port>
+            </udpv4>
+          </locator>
+          <locator>
+            <udpv4>
+              <address>10.208.52.144</address>
+              <port>7410</port>
+            </udpv4>
+          </locator>
+          <locator>
+            <udpv4>
+              <address>10.208.52.144</address>
+              <port>7412</port>
+            </udpv4>
+          </locator>
+        </initialPeersList>
+      </builtin>
+    </rtps>
+  </participant>
+</profiles>
