@@ -52,9 +52,9 @@ extern TIM_HandleTypeDef htim14;
 #define UROS_PING_ATTEMPTS   10u
 #define UROS_STARTUP_DELAY_MS 500u
 #define DIAG_ENC_MS               100u
-#define DIAG_MOTOR_RUN_MS       15000u
+#define DIAG_MOTOR_RUN_MS        1000u
 #define DIAG_MOTOR_STOP_MS        500u
-#define DIAG_MOTOR_DUTY_PERCENT    55u
+#define DIAG_MOTOR_DUTY_PERCENT    15u
 
 #define MADGWICK_BETA   0.033f
 #define CF_ALPHA        0.98f
@@ -72,23 +72,8 @@ extern TIM_HandleTypeDef htim14;
 #define S_FLIP_P    (25.0f * 0.017453293f)
 #define S_ESTOP_CONFIRM 5u
 
-#define KP          0.5f
-#define KI          0.1f
-#define ENC_VEL_LPF_ALPHA        0.65f
-#define SYNC_PAIR_K              0.20f
-#define SYNC_STRAIGHT_K          0.10f
-#define SYNC_DEADBAND_MMPS       1.0f
 #define TARGET_STOP_EPS_MMPS     0.5f
-#define SLIP_MIN_TARGET_MMPS     6.0f
-#define SLIP_TARGET_EXCESS_MMPS  8.0f
-#define SLIP_PAIR_DELTA_MMPS     10.0f
-#define SLIP_SIDE_DELTA_MMPS     8.0f
-#define SLIP_RISK_LPF_ALPHA      0.80f
-#define SLIP_ALERT_THRESHOLD     0.45f
 #define WDG_MS     2000u
-#define NORMAL_FALLBACK_SPEED_MMPS  22.0f
-#define NORMAL_FALLBACK_RUN_MS    3000u
-#define NORMAL_FALLBACK_STOP_MS    750u
 
 #define GY_COV      (0.00262f * 0.00262f)
 #define AC_COV      (0.02256f * 0.02256f)
@@ -123,7 +108,7 @@ static geometry_msgs__msg__Twist msg_cmd;
 
 static int32_t tick_buf[MOTOR_NUM];
 static float vel_buf[MOTOR_NUM];
-static int32_t status_buf[5];
+static int32_t status_buf[7];
 static char frame_id[] = "imu_link";
 static uint8_t g_uros_allocated;
 #endif
@@ -133,13 +118,9 @@ static ICM20948_Calib calib;
 static Madgwick_t ahrs;
 
 static float g_tilt_risk;
-static float g_slip_risk;
 static float g_risk;
 static float g_scale = 1.0f;
 static float g_target[MOTOR_NUM];
-static float g_integral[MOTOR_NUM];
-static float g_measured_filt[MOTOR_NUM];
-static float g_wheel_slip[MOTOR_NUM];
 static uint32_t g_cmd_ms;
 static uint32_t g_cmd_count;
 static uint8_t g_esp32_ok;
@@ -150,7 +131,6 @@ static uint8_t g_imu_ok;
 static uint8_t g_ros_ok;
 static uint8_t g_emergency_stop;
 static uint8_t g_estop_count;
-static uint8_t g_slip_alert;
 volatile int32_t g_ros_error;
 volatile uint32_t g_ros_rx_bytes;
 volatile uint32_t g_ros_tx_bytes;
@@ -194,10 +174,9 @@ static float clamp01f(float value)
 
 static void update_combined_risk(void)
 {
-    float dominant_risk = g_tilt_risk > g_slip_risk ? g_tilt_risk : g_slip_risk;
     float one_minus_risk;
 
-    g_risk = clamp01f(dominant_risk);
+    g_risk = clamp01f(g_tilt_risk);
     one_minus_risk = 1.0f - g_risk;
     g_scale = one_minus_risk * one_minus_risk;
 }
@@ -248,137 +227,22 @@ static void update_safety(void)
     update_combined_risk();
 }
 
-static void update_slip_risk(void)
+static void motor_control(void)
 {
-    float side_avg[2];
-    uint8_t active_wheels = 0u;
-    float slip_sum = 0.0f;
-
-    if (!g_encoder_feedback_ok) {
-        memset(g_wheel_slip, 0, sizeof(g_wheel_slip));
-        g_slip_risk = 0.0f;
-        g_slip_alert = 0u;
-        update_combined_risk();
-        return;
-    }
-
-    side_avg[0] = 0.5f * (fabsf(g_measured_filt[MOTOR_FL]) + fabsf(g_measured_filt[MOTOR_RL]));
-    side_avg[1] = 0.5f * (fabsf(g_measured_filt[MOTOR_FR]) + fabsf(g_measured_filt[MOTOR_RR]));
-
-    for (uint8_t i = 0; i < MOTOR_NUM; i++) {
-        float target_mag = fabsf(g_target[i] * g_scale);
-        float measured_mag = fabsf(g_measured_filt[i]);
-        float side_mag = (i == MOTOR_FL || i == MOTOR_RL) ? side_avg[0] : side_avg[1];
-        float target_excess;
-        float pair_mismatch;
-        float wheel_slip;
-
-        if (target_mag < SLIP_MIN_TARGET_MMPS) {
-            g_wheel_slip[i] = 0.0f;
-            continue;
-        }
-
-        active_wheels++;
-        target_excess = clamp01f((measured_mag - target_mag) / SLIP_TARGET_EXCESS_MMPS);
-        pair_mismatch = clamp01f(fabsf(measured_mag - side_mag) / SLIP_PAIR_DELTA_MMPS);
-        wheel_slip = (0.6f * target_excess) + (0.4f * pair_mismatch);
-        g_wheel_slip[i] = clamp01f(wheel_slip);
-        slip_sum += g_wheel_slip[i];
-    }
-
-    if (active_wheels == 0u) {
-        memset(g_wheel_slip, 0, sizeof(g_wheel_slip));
-        g_slip_risk = 0.0f;
-        g_slip_alert = 0u;
-        update_combined_risk();
-        return;
-    }
-
-    {
-        float side_delta = clamp01f(fabsf(side_avg[0] - side_avg[1]) / SLIP_SIDE_DELTA_MMPS);
-        float slip_mean = slip_sum / (float)active_wheels;
-        float raw_slip_risk = clamp01f((0.7f * slip_mean) + (0.3f * side_delta));
-        g_slip_risk = (SLIP_RISK_LPF_ALPHA * g_slip_risk) +
-                      ((1.0f - SLIP_RISK_LPF_ALPHA) * raw_slip_risk);
-    }
-
-    g_slip_alert = g_slip_risk >= SLIP_ALERT_THRESHOLD ? 1u : 0u;
-    update_combined_risk();
-}
-
-static void motor_pid(float dt)
-{
-    float side_avg[2];
-    float straight_avg = 0.0f;
-    uint8_t straight_mode;
-
-    if (!g_encoder_feedback_ok) {
-        memset(g_integral, 0, sizeof(g_integral));
-        memset(g_measured_filt, 0, sizeof(g_measured_filt));
-        for (uint8_t i = 0; i < MOTOR_NUM; i++) {
-            Motor_Set((Motor_ID)i, g_target[i] * g_scale);
-        }
+    if (!g_host_ok || g_emergency_stop) {
+        Motor_StopAll();
         return;
     }
 
     for (uint8_t i = 0; i < MOTOR_NUM; i++) {
-        float measured = Encoder_VelMmps(i);
-        g_measured_filt[i] = (ENC_VEL_LPF_ALPHA * g_measured_filt[i]) +
-                             ((1.0f - ENC_VEL_LPF_ALPHA) * measured);
-    }
-
-    update_slip_risk();
-
-    side_avg[0] = 0.5f * (g_measured_filt[MOTOR_FL] + g_measured_filt[MOTOR_RL]);
-    side_avg[1] = 0.5f * (g_measured_filt[MOTOR_FR] + g_measured_filt[MOTOR_RR]);
-    straight_mode =
-        (fabsf(g_target[MOTOR_FL] - g_target[MOTOR_FR]) < 2.0f) &&
-        ((g_target[MOTOR_FL] * g_target[MOTOR_FR]) >= 0.0f);
-
-    if (straight_mode) {
-        for (uint8_t i = 0; i < MOTOR_NUM; i++) {
-            straight_avg += g_measured_filt[i];
-        }
-        straight_avg *= 0.25f;
-    }
-
-    for (uint8_t i = 0; i < MOTOR_NUM; i++) {
-        float target = g_target[i] * g_scale;
-        float measured = g_measured_filt[i];
-        float pair_error;
-        float sync_term = 0.0f;
-        float error = target - measured;
-        float command;
-
-        if (i == MOTOR_FL || i == MOTOR_RL) {
-            pair_error = side_avg[0] - measured;
-        } else {
-            pair_error = side_avg[1] - measured;
-        }
-
-        if (fabsf(pair_error) >= SYNC_DEADBAND_MMPS) {
-            sync_term += SYNC_PAIR_K * pair_error;
-        }
-
-        if (straight_mode) {
-            float straight_error = straight_avg - measured;
-            if (fabsf(straight_error) >= SYNC_DEADBAND_MMPS) {
-                sync_term += SYNC_STRAIGHT_K * straight_error;
-            }
-        }
+        float target = g_target[i];
 
         if (fabsf(target) < TARGET_STOP_EPS_MMPS) {
-            g_integral[i] = 0.0f;
             Motor_Set((Motor_ID)i, 0.0f);
             continue;
         }
 
-        g_integral[i] += error * dt;
-        if (g_integral[i] > MOTOR_ILIMIT) g_integral[i] = MOTOR_ILIMIT;
-        if (g_integral[i] < -MOTOR_ILIMIT) g_integral[i] = -MOTOR_ILIMIT;
-
-        command = target + KP * error + KI * g_integral[i] + sync_term;
-        Motor_Set((Motor_ID)i, command);
+        Motor_Set((Motor_ID)i, target * g_scale);
     }
 }
 
@@ -392,7 +256,6 @@ static void update_normal_mode_targets(uint32_t now)
 
     /* Keep the rover stationary until ROS is online and sending fresh commands. */
     memset(g_target, 0, sizeof(g_target));
-    memset(g_integral, 0, sizeof(g_integral));
 }
 
 #ifdef USE_MICROROS
@@ -457,8 +320,8 @@ static void uros_setup(void)
     msg_vel.data.size = MOTOR_NUM;
     msg_vel.data.capacity = MOTOR_NUM;
     msg_status.data.data = status_buf;
-    msg_status.data.size = 5;
-    msg_status.data.capacity = 5;
+    msg_status.data.size = 7;
+    msg_status.data.capacity = 7;
 
     msg_imu.header.frame_id.data = frame_id;
     msg_imu.header.frame_id.size = 8;
@@ -573,7 +436,9 @@ static void publish_status(void)
     status_buf[1] = (int32_t)g_wheels_ok;
     status_buf[2] = (int32_t)g_imu_ok;
     status_buf[3] = (int32_t)g_host_ok;
-    status_buf[4] = (int32_t)g_cmd_count;
+    status_buf[4] = (int32_t)g_ros_ok;
+    status_buf[5] = (int32_t)g_emergency_stop;
+    status_buf[6] = (int32_t)g_cmd_count;
 
     if (rcl_publish(&pub_status, &msg_status, NULL) != RCL_RET_OK) {
         g_ros_ok = 0u;
@@ -649,7 +514,6 @@ void App_MotorEsp32Diag_Run(void)
     g_ros_ok = 0u;
     g_host_ok = 1u;
     g_tilt_risk = 0.0f;
-    g_slip_risk = 0.0f;
     g_risk = 0.0f;
     g_scale = 1.0f;
     g_esp32_ok = 0u;
@@ -743,12 +607,8 @@ void App_Run(void)
     g_wheels_ok = 0u;
     g_encoder_feedback_ok = 0u;
     g_tilt_risk = 0.0f;
-    g_slip_risk = 0.0f;
     g_risk = 0.0f;
     g_scale = 1.0f;
-    g_slip_alert = 0u;
-    memset(g_measured_filt, 0, sizeof(g_measured_filt));
-    memset(g_wheel_slip, 0, sizeof(g_wheel_slip));
     g_imu_ok = 0u;
     LCD_Display_BootStatus(g_imu_ok, g_esp32_ok, g_ros_ok);
 
@@ -805,7 +665,6 @@ void App_Run(void)
         g_host_ok = (g_ros_ok && ((now - g_cmd_ms) <= WDG_MS)) ? 1u : 0u;
         if (!g_host_ok && last_host_ok) {
             memset(g_target, 0, sizeof(g_target));
-            memset(g_integral, 0, sizeof(g_integral));
             Motor_StopAll();
         }
         last_host_ok = g_host_ok;
@@ -836,7 +695,6 @@ void App_Run(void)
                 memset(&imu, 0, sizeof(imu));
                 filter_seeded = 0u;
                 g_tilt_risk = 0.0f;
-                g_slip_risk = 0.0f;
                 g_risk = 0.0f;
                 g_emergency_stop = 0u;
                 g_estop_count = 0u;
@@ -904,13 +762,12 @@ void App_Run(void)
         }
 
         if (now - t_pid >= PID_MS) {
-            float dt = (float)(now - t_pid) * 0.001f;
             t_pid = now;
             if (!g_host_ok) {
                 memset(g_target, 0, sizeof(g_target));
-                memset(g_integral, 0, sizeof(g_integral));
+                Motor_StopAll();
             } else {
-                motor_pid(dt);
+                motor_control();
             }
         }
 

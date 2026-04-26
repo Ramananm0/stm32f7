@@ -12,9 +12,9 @@ typedef enum {
     MOTOR_NUM = 4
 } Motor_ID;
 
-#define MOTOR_MAX_SPEED_MMPS   44.5f
-#define MOTOR_RAMP_STEP          200u
-#define MOTOR_ILIMIT           (MOTOR_MAX_SPEED_MMPS * 0.5f)
+#define MOTOR_MAX_SPEED_MMPS          44.5f
+#define MOTOR_COMMAND_DUTY_LIMIT_PCT   100u
+#define MOTOR_RAMP_STEP                200u
 
 void Motor_Init(TIM_HandleTypeDef *htim10,
                 TIM_HandleTypeDef *htim11,

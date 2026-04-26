@@ -33,17 +33,16 @@ STM32 GND      →  ESP32 GND
 ```
 STM32 D15 (PB8)  →  ESP32 GPIO22 (SCL)
 STM32 D14 (PB9)  →  ESP32 GPIO21 (SDA)
-
-Pull-up resistors: 4.7kΩ from SDA to 3.3V
-                   4.7kΩ from SCL to 3.3V
-(check if ICM-20948 module already has them)
 ```
+
+STM32 `I2C1` is configured as open-drain with `GPIO_PULLUP` in firmware. If the
+shared bus is unstable, add or verify external pull-ups on SDA and SCL.
 
 ### Encoder connections
 ```
 Motor   CH_A (green wire)   CH_B (white wire)
 ─────   ─────────────────   ─────────────────
-FL      GPIO16              GPIO17
+FL      GPIO4               GPIO13
 FR      GPIO18              GPIO19
 RL      GPIO25              GPIO26
 RR      GPIO32              GPIO33
@@ -52,10 +51,14 @@ Red  wire → 5V
 Black wire → GND
 ```
 
-Avoid GPIO4, GPIO5, GPIO12, and GPIO15 for encoder inputs on the ESP32-WROOM
-bringup harness. They are boot/flash strapping pins on common ESP32 DevKit
-boards, and attached encoder electronics can prevent the flash chip from being
-detected during upload.
+Current firmware uses `GPIO4` and `GPIO13` for the front-left encoder, even
+though older notes used `GPIO16` and `GPIO17`. Treat `esp32/src/main.cpp` as
+the source of truth if the harness and this README ever diverge again.
+
+`GPIO4` is a boot strapping pin on common ESP32 DevKit boards. If flashing or
+boot becomes unreliable with the encoder connected, disconnect that channel
+during upload or move the front-left encoder back to a non-strapping pin pair
+and update the firmware to match.
 
 ---
 
@@ -136,7 +139,7 @@ Or use **VS Code + PlatformIO extension**:
 
 When running, the ESP32 prints periodic I2C activity:
 ```
-i2c requests=123 receives=77 dirs=0,0,0,0
+i2c requests=123 receives=77 dirs=0,0,0,0 ticks=10,20,30,40 speed=1.2,1.3,1.4,1.5
 ```
 
 ---
@@ -149,4 +152,5 @@ i2c requests=123 receives=77 dirs=0,0,0,0
 | Encoders count wrong | CH_A/CH_B swapped | Swap green/white wires |
 | Speed always 0 | PCNT not started | Check GPIO pin numbers |
 | Counts drift | Noise on encoder lines | Increase PCNT filter value |
-| I2C timeout | Pull-ups missing | Add 4.7kΩ on SDA and SCL |
+| I2C timeout | Weak or missing bus pull-ups | Verify shared-bus pull-ups on SDA and SCL |
+| Flash upload fails | Boot strapping conflict on FL encoder | Disconnect GPIO4 encoder lead during upload or reassign the FL pair in firmware |

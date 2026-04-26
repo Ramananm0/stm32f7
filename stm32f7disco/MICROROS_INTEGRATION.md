@@ -51,6 +51,32 @@ USE_MICROROS
 
 8. Rebuild.
 
+## Host transport status
+
+The checked-in firmware currently binds the micro-ROS custom transport to
+`USART6` in [Src/app.c](Src/app.c) and uses the UART interrupt transport in
+`Src/microros_transport.c`.
+
+The Raspberry Pi side can already consume either:
+
+- native USB CDC ACM as `/dev/ttyACM*`
+- the older USB-TTL adapter as `/dev/ttyUSB*`
+
+Both should map to `/dev/stm32` through udev.
+
+## USB CDC note
+
+Native USB CDC is not a one-line switch in this repo's current STM32 project.
+Two concrete gaps remain:
+
+- the CubeMX project does not currently have the USB device middleware checked in
+- `PA11` and `PA12` are assigned to LTDC in `stm32f7disco.ioc`, which conflicts
+  with USB FS on STM32F746
+
+So the Pi-side repo can be prepared for CDC now, but the STM32 firmware cannot
+truthfully expose a CDC device from this repository alone until those two
+project-level issues are resolved.
+
 ## UART
 
 The current CubeMX project configures USART6 on:
@@ -62,8 +88,9 @@ Baud = 115200
 ```
 
 Run the Raspberry Pi / host agent with the same baud rate unless CubeMX is changed.
+If `/dev/stm32` points to a `ttyACM` CDC device, the agent still opens it via
+the serial backend; the baud setting is simply retained for CLI compatibility.
 
 ```bash
-ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyUSB0 -b 115200
+ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/stm32 -b 115200
 ```
-

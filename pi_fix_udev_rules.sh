@@ -1,5 +1,9 @@
 cat <<'EOF' | sudo tee /etc/udev/rules.d/99-stm32-usb.rules >/dev/null
-# STM32 micro-ROS USB-TTL adapter (PL2303)
+# STM32 native USB CDC ACM device
+SUBSYSTEM=="tty", KERNEL=="ttyACM*", ATTRS{idVendor}=="0483", \
+    SYMLINK+="stm32", MODE="0666", GROUP="dialout"
+
+# STM32 micro-ROS USB-TTL adapter (PL2303 fallback)
 SUBSYSTEM=="tty", ATTRS{idVendor}=="067b", ATTRS{idProduct}=="2303", \
     SYMLINK+="stm32", MODE="0666", GROUP="dialout"
 EOF
@@ -17,4 +21,4 @@ echo ---RULES---
 cat /etc/udev/rules.d/99-stm32-usb.rules
 cat /etc/udev/rules.d/99-rplidar.rules
 echo ---LINKS---
-ls -l /dev/stm32 /dev/rplidar /dev/ttyUSB* 2>/dev/null || true
+ls -l /dev/stm32 /dev/rplidar /dev/ttyUSB* /dev/ttyACM* 2>/dev/null || true

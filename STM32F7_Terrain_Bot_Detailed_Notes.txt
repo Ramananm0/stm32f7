@@ -1190,7 +1190,8 @@ During running:
     Moving the robot during calibration causes bad bias values.
 
 9. I2C pullups are required.
-    PB8/PB9 are configured with GPIO_NOPULL, so external pullups are expected.
+    The firmware configures PB8/PB9 with GPIO_PULLUP in I2C mode.
+    If the shared bus is unstable, verify external pullups on SDA/SCL as well.
 
 
 ============================================================
@@ -1218,7 +1219,7 @@ If encoder fails:
     Check ESP32 I2C address 0x30.
     Check PB8/PB9 wiring.
     Check pullups.
-    Check ESP32 sends 32 bytes.
+    Check ESP32 sends 36 bytes.
 
 If ROS does not connect:
     Check UART6 pins PC6/PC7.
